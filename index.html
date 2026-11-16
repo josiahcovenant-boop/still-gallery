@@ -372,16 +372,20 @@ var leather=std({color:0x16171a,roughness:.5,bumpMap:null,envMapIntensity:.5});
 
 var LEFT=[-5,2],RIGHT=[-3,4],ARCH_R=1.1,ARCH_SPRING=2.3;
 function rectShape(w0,w1,y0,y1){var s=new THREE.Shape();s.moveTo(w0,y0);s.lineTo(w1,y0);s.lineTo(w1,y1);s.lineTo(w0,y1);s.closePath();return s}
-function wallGeo(archLocalX,door){
+// Leave room for the painting to swing into the main gallery behind the arch.
+var DIVIDER_X=2.35,DIVIDER_DEPTH=.5,DIVIDER_Z=.5,DIVIDER_MIN_Z=-2.2,DIVIDER_MAX_Z=2.35;
+var DIVIDER_MARGIN=.18,DIVIDER_RETURN_MARGIN=.3;
+var dividerMeshes=[];
+function wallGeo(archLocalX,door,minX=-9.5,maxX=9.5){
   var s=new THREE.Shape(),it=archLocalX.map(function(c){return {c:c,k:'a'}});
   if(door)it.push({c:(door[0]+door[1])/2,k:'d'});
   it.sort(function(p,q){return p.c-q.c});
-  s.moveTo(-9.5,0);
+  s.moveTo(minX,0);
   it.forEach(function(o){
     if(o.k==='a'){var cx=o.c;s.lineTo(cx-ARCH_R,0);s.lineTo(cx-ARCH_R,ARCH_SPRING);s.absarc(cx,ARCH_SPRING,ARCH_R,Math.PI,0,true);s.lineTo(cx+ARCH_R,0)}
     else{s.lineTo(door[0],0);s.lineTo(door[0],door[2]);s.lineTo(door[1],door[2]);s.lineTo(door[1],0)}
   });
-  s.lineTo(9.5,0);s.lineTo(9.5,5.05);s.lineTo(-9.5,5.05);s.closePath();
+  s.lineTo(maxX,0);s.lineTo(maxX,5.05);s.lineTo(minX,5.05);s.closePath();
   return new THREE.ExtrudeGeometry(s,{depth:.5,bevelEnabled:false,curveSegments:32});
 }
 var world=new THREE.Group();scene.add(world);
@@ -424,6 +428,26 @@ var world=new THREE.Group();scene.add(world);
     segs.forEach(function(s){var L=s[1]-s[0];var m=new THREE.Mesh(new THREE.BoxGeometry(.03,.14,L),baseMat);m.position.set(side*(ROOM.hw-.015),.07,(s[0]+s[1])/2);world.add(m)});
   }
   base(-1,LEFT);base(1,RIGHT,[[.5,1.4]]);
+  /* Divider and returns around the hidden-door approach. */
+  function dividerPart(geo,mat,x,y,z){
+    var m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);world.add(m);dividerMeshes.push(m);
+  }
+  var gd=wallGeo([-DIVIDER_Z],null,-DIVIDER_MAX_Z,-DIVIDER_MIN_Z);
+  gd.rotateY(Math.PI/2);dividerPart(gd,wallMat,DIVIDER_X,0,0);
+  var returnLength=ROOM.hw-DIVIDER_X-DIVIDER_DEPTH;
+  var returnX=ROOM.hw-returnLength/2;
+  [DIVIDER_MIN_Z,DIVIDER_MAX_Z].forEach(function(z){
+    dividerPart(new THREE.BoxGeometry(returnLength,5.05,.18),wallMat,returnX,2.525,z);
+    [-.105,.105].forEach(function(offset){
+      dividerPart(new THREE.BoxGeometry(returnLength,.14,.03),baseMat,returnX,.07,z+offset);
+    });
+  });
+  [[DIVIDER_MIN_Z-.09,DIVIDER_Z-ARCH_R],[DIVIDER_Z+ARCH_R,DIVIDER_MAX_Z+.09]].forEach(function(seg){
+    var z=(seg[0]+seg[1])/2;
+    [DIVIDER_X-.015,DIVIDER_X+DIVIDER_DEPTH+.015].forEach(function(x){
+      dividerPart(new THREE.BoxGeometry(.03,.14,seg[1]-seg[0]),baseMat,x,.07,z);
+    });
+  });
   var bb=new THREE.Mesh(new THREE.BoxGeometry(12,.14,.03),baseMat);bb.position.set(0,.07,-ROOM.hl+.015);world.add(bb);
   var bf=bb.clone();bf.position.z=ROOM.hl-.015;world.add(bf);
 })();
@@ -564,13 +588,41 @@ function addSpot(a){
 /* ---------- Input & movement ---------- */
 var P={x:0,z:13.8,yaw:0,pitch:0,vx:0,vz:0},EYE=1.62;
 var keys={},joy={x:0,y:0},drag=null,focusIdx=-1,tween=null,dirty=true;
+function hitsDivider(x,z){
+  if(x<DIVIDER_X-DIVIDER_MARGIN||x>ROOM.hw+DIVIDER_MARGIN)return false;
+  if(z<DIVIDER_MIN_Z-DIVIDER_RETURN_MARGIN||z>DIVIDER_MAX_Z+DIVIDER_RETURN_MARGIN)return false;
+  if(x<=DIVIDER_X+DIVIDER_DEPTH+DIVIDER_MARGIN)return Math.abs(z-DIVIDER_Z)>=ARCH_R-DIVIDER_MARGIN;
+  return Math.abs(z-DIVIDER_MIN_Z)<=DIVIDER_RETURN_MARGIN||Math.abs(z-DIVIDER_MAX_Z)<=DIVIDER_RETURN_MARGIN;
+}
 function inZone(x,z){
+  if(hitsDivider(x,z))return false;
   if(doorOpen){
     if(x>5.4&&x<=9.1&&z>-.6&&z<1.6)return true;
     if(x>9.1&&x<20.4&&Math.abs(z)<4.1){if(Math.abs(x-15)<.95&&Math.abs(z)<.95)return false;if((Math.abs(x-13)<.6||Math.abs(x-17)<.6)&&Math.abs(z)<1.45)return false;return true}
   }
   if(Math.abs(x)<=5.55&&Math.abs(z)<=8.55)return true;
   var set=x<0?LEFT:RIGHT;for(var i=0;i<set.length;i++){if(Math.abs(z-set[i])<=.9&&Math.abs(x)>5.3&&Math.abs(x)<=8.2)return true}return false;
+}
+// Route scripted moves around the divider when a straight line crosses it.
+function dividerPath(x0,z0,x1,z1){
+  var start=[x0,z0],end=[x1,z1],steps=Math.ceil(Math.hypot(x1-x0,z1-z0)/.05);
+  for(var i=1;i<steps;i++){
+    if(hitsDivider(x0+(x1-x0)*i/steps,z0+(z1-z0)*i/steps)){
+      var approachX=DIVIDER_X-DIVIDER_MARGIN-.08;
+      function approach(x,z){
+        var inside=x>DIVIDER_X-DIVIDER_MARGIN&&z>DIVIDER_MIN_Z&&z<DIVIDER_MAX_Z;
+        if(inside)return [[x,DIVIDER_Z],[approachX,DIVIDER_Z]];
+        return x>approachX?[[approachX,z]]:[];
+      }
+      return [start].concat(approach(x0,z0),approach(x1,z1).reverse(),[end]);
+    }
+  }
+  return [start,end];
+}
+function followPath(path,u){
+  var last=path.length-1,t=u*last,i=Math.min(Math.floor(t),last-1),k=ease(t-i);
+  var a=path[i],b=path[i+1];
+  P.x=a[0]+(b[0]-a[0])*k;P.z=a[1]+(b[1]-a[1])*k;
 }
 function applyCam(){camera.position.set(P.x,EYE,P.z);camera.rotation.set(P.pitch,P.yaw,0,'YXZ')}
 function resetView(){if(gate||intro)return;if(doorPivot)doorPivot.rotation.y=0;doorOpen=false;doorAnim=null;walkAnim=null;afterWalk=-1;closeWorks();if(!$('#detail').hidden)closeDetail();exitFocus();P.x=0;P.z=13.8;P.yaw=0;P.pitch=0;P.vx=P.vz=0;setDoors(0);gate=true;$('#enter').hidden=false;$('#app').classList.add('gate');dirty=true}
@@ -586,7 +638,7 @@ function focusOn(i){
   var dx=a.center.x-tx,dz=a.center.z-tz,dy=a.center.y-EYE;
   var yaw=Math.atan2(-dx,-dz),pitch=Math.atan2(dy,Math.hypot(dx,dz));
   if(camera.aspect>1.2&&innerWidth>900)yaw-=Math.atan(.2*Math.tan(hf/2));
-  tween={t:0,dur:reduceMotion?.01:1.1,from:{x:P.x,z:P.z,yaw:P.yaw,pitch:P.pitch},to:{x:tx,z:tz,yaw:P.yaw+angDiff(P.yaw,yaw),pitch:pitch}};
+  tween={t:0,dur:reduceMotion?.01:1.1,path:dividerPath(P.x,P.z,tx,tz),from:{yaw:P.yaw,pitch:P.pitch},to:{yaw:P.yaw+angDiff(P.yaw,yaw),pitch:pitch}};
   focusIdx=i;showCaption(i);closeWorks();
 }
 function exitFocus(){focusIdx=-1;tween=null;$('#cap').hidden=true}
@@ -625,7 +677,10 @@ function refreshListItem(a){
 function raycastAt(cx,cy){
   var rc=new THREE.Raycaster(),r=renderer.domElement.getBoundingClientRect();
   rc.setFromCamera(new THREE.Vector2(((cx-r.left)/r.width)*2-1,-((cy-r.top)/r.height)*2+1),camera);rc.far=14;
-  var h=rc.intersectObjects(paintMeshes,false);return h.length?h[0].object.userData.idx:-1;
+  var h=rc.intersectObjects(paintMeshes,false);
+  if(!h.length)return -1;
+  rc.far=h[0].distance;
+  return rc.intersectObjects(dividerMeshes,false).length?-1:h[0].object.userData.idx;
 }
 var canvasEl=$('#gl');
 canvasEl.addEventListener('pointerdown',function(e){if(gate)return;if(intro){finishIntro();return}if(e.target!==canvasEl)return;canvasEl.focus({preventScroll:true});if(e.pointerType==='touch'&&joy.id===e.pointerId)return;drag={id:e.pointerId,x:e.clientX,y:e.clientY,sx:e.clientX,sy:e.clientY,t:performance.now(),moved:false};canvasEl.setPointerCapture(e.pointerId)});
@@ -713,12 +768,12 @@ function tick(now){
   var moving=false;
   if(doorAnim){doorAnim.t+=dt;var dk=ease(clamp(doorAnim.t/1.8,0,1));doorPivot.rotation.y=doorAnim.from+(doorAnim.to-doorAnim.from)*dk;moving=true;dirty=true;if(doorAnim.t>=1.8){doorAnim=null;startDoorWalk()}}
   if(walkAnim){walkAnim.t+=dt;var u=clamp(walkAnim.t/walkAnim.dur,0,1);
-    if(u<.4){var wk=ease(u/.4);P.x=walkAnim.sx+(5-walkAnim.sx)*wk;P.z=walkAnim.sz+(.5-walkAnim.sz)*wk}
-    else{var wk2=ease((u-.4)/.6);P.x=5+(10.8-5)*wk2;P.z=.5}
+    if(u<.4)followPath(walkAnim.path,u/.4);
+    else{P.x=5+(10.8-5)*ease((u-.4)/.6);P.z=DIVIDER_Z}
     P.yaw=walkAnim.syaw+(walkAnim.eyaw-walkAnim.syaw)*ease(u);moving=true;if(u>=1){walkAnim=null;if(afterWalk>=0){var fk=afterWalk;afterWalk=-1;focusOn(fk)}}}
   if(intro){intro.t+=dt;var it=intro.t,ang=it<5.6?ease(clamp(it/1.7,0,1))*1.65:1.65*(1-ease(clamp((it-5.6)/1.5,0,1))),w=ease(clamp((it-.9)/4.7,0,1));
     setDoors(ang);P.x=0;P.z=13.8+(5.5-13.8)*w;P.yaw=0;P.pitch=-.03*Math.sin(w*Math.PI);moving=true;if(it>=7.1)finishIntro()}
-  else if(tween){tween.t+=dt/tween.dur;var k=ease(Math.min(1,tween.t)),f=tween.from,o=tween.to;P.x=f.x+(o.x-f.x)*k;P.z=f.z+(o.z-f.z)*k;P.yaw=f.yaw+(o.yaw-f.yaw)*k;P.pitch=f.pitch+(o.pitch-f.pitch)*k;moving=true;if(tween.t>=1)tween=null}
+  else if(tween){tween.t+=dt/tween.dur;var k=ease(Math.min(1,tween.t)),f=tween.from,o=tween.to;followPath(tween.path,Math.min(1,tween.t));P.yaw=f.yaw+(o.yaw-f.yaw)*k;P.pitch=f.pitch+(o.pitch-f.pitch)*k;moving=true;if(tween.t>=1)tween=null}
   else{
     var fw=(keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0)+joy.y,sd=(keys.KeyD?1:0)-(keys.KeyA?1:0)+joy.x,tn=(keys.ArrowLeft?1:0)-(keys.ArrowRight?1:0);
     if(tn){P.yaw+=tn*1.5*dt;moving=true}
@@ -860,7 +915,9 @@ function buildHidden(){
   var w2=new THREE.PointLight(0xffe2bc,.8,6.5,1.4);w2.position.set(19.8,3.0,0);scene.add(w2);
 }
 function openDoor(){if(doorOpen||!doorPivot)return;doorOpen=true;doorAnim={t:0,from:doorPivot.rotation.y,to:-1.9};}
-function startDoorWalk(){walkAnim={t:0,dur:4.2,sx:P.x,sz:P.z,syaw:P.yaw,eyaw:P.yaw+angDiff(P.yaw,-Math.PI/2)};P.vx=P.vz=0}
+function startDoorWalk(){
+  walkAnim={t:0,dur:4.2,path:dividerPath(P.x,P.z,5,DIVIDER_Z),syaw:P.yaw,eyaw:P.yaw+angDiff(P.yaw,-Math.PI/2)};P.vx=P.vz=0;
+}
 function loadUrl(u){return new Promise(function(res,rej){var im=new Image();im.onload=function(){res(im)};im.onerror=rej;im.src=u})}
 async function boot(){
   resize();addRails();buildDoor();buildHidden();
